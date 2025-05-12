@@ -1,0 +1,99 @@
+# Railway-specific Dockerfile for OpenRouteService
+FROM docker.io/maven:3.9.9-amazoncorretto-21-alpine AS build
+
+WORKDIR /tmp/ors
+
+# Copy only what's needed for build
+COPY ors-api/pom.xml /tmp/ors/ors-api/pom.xml
+COPY ors-engine/pom.xml /tmp/ors/ors-engine/pom.xml
+COPY pom.xml /tmp/ors/pom.xml
+COPY ors-report-aggregation/pom.xml /tmp/ors/ors-report-aggregation/pom.xml 
+COPY ors-test-scenarios/pom.xml /tmp/ors/ors-test-scenarios/pom.xml
+COPY ors-benchmark/pom.xml /tmp/ors/ors-benchmark/pom.xml
+
+# Install tools to download and extract Bogota OSM data
+RUN apk add --no-cache wget curl jq osmium-tool
+
+# Download and process Bogota data in a single layer to save space
+RUN echo "Downloading and processing Bogota OSM data..." && \
+    # Create a temporary directory for processing
+    mkdir -p /tmp/osm && \
+    cd /tmp/osm && \
+    # Download Colombia extract
+    echo "Downloading Colombia extract..." && \
+    wget -O colombia.osm.pbf "https://download.geofabrik.de/south-america/colombia-latest.osm.pbf" && \
+    # Extract only Bogota from the Colombia extract
+    echo "Extracting Bogota region..." && \
+    osmium extract -b -74.2,4.5,-74.0,4.8 colombia.osm.pbf -o /tmp/bogota.osm.pbf && \
+    # Verify the extract was created successfully
+    if [ -f /tmp/bogota.osm.pbf ]; then \
+        echo "Bogota extract created successfully: $(du -h /tmp/bogota.osm.pbf)" && \
+        # Remove the larger Colombia file to save space
+        rm -f colombia.osm.pbf; \
+    else \
+        echo "ERROR: Bogota extract creation failed!"; \
+        exit 1; \
+    fi
+
+# Get dependencies
+RUN mvn -pl 'ors-api,ors-engine' -q dependency:go-offline
+
+# Copy source code
+COPY ors-api /tmp/ors/ors-api
+COPY ors-engine /tmp/ors/ors-engine
+
+# Build the project
+RUN mvn -pl 'ors-api,ors-engine' -q clean package -DskipTests -Dmaven.test.skip=true
+
+FROM docker.io/golang:1.24.2-alpine3.21 AS build-go
+# Install yq
+RUN GO111MODULE=on go install github.com/mikefarah/yq/v4@v4.45.1
+
+# Final image
+FROM docker.io/amazoncorretto:21.0.6-alpine3.21
+
+# Set up environment
+ENV ORS_HOME=/home/ors
+ENV LANG='en_US' LANGUAGE='en_US' LC_ALL='en_US'
+ENV BUILD_GRAPHS="False"
+ENV REBUILD_GRAPHS="True"
+
+# Install required packages and set up user
+RUN apk update && apk add --no-cache bash=~5 jq=~1 openssl=~3 wget && \
+    addgroup -g 1000 ors && \
+    mkdir -p ${ORS_HOME}/logs ${ORS_HOME}/files ${ORS_HOME}/graphs ${ORS_HOME}/elevation_cache ${ORS_HOME}/config && \
+    adduser -D -h ${ORS_HOME} -u 1000 --system -G ors ors && \
+    chown -R ors:ors ${ORS_HOME} && \
+    chmod -R 777 ${ORS_HOME}
+
+# Copy from build stage
+COPY --chown=ors:ors --from=build /tmp/ors/ors-api/target/ors.jar /ors.jar
+COPY --chown=ors:ors --from=build-go /go/bin/yq /bin/yq
+COPY --chown=ors:ors docker-entrypoint.sh /entrypoint.sh
+
+# Copy the Bogota OSM extract to the expected location
+COPY --chown=ors:ors --from=build /tmp/bogota.osm.pbf ${ORS_HOME}/files/example-heidelberg.test.pbf
+RUN chmod 644 ${ORS_HOME}/files/example-heidelberg.test.pbf && \
+    echo "OSM file info:" && \
+    ls -la ${ORS_HOME}/files/
+
+# Copy and set up config
+COPY --chown=ors:ors ors-config.yml /example-ors-config.yml
+COPY --chown=ors:ors ors-config.env /example-ors-config.env
+
+# Configure the OSM file path and profiles
+# Note: We're using the same file path as expected in the original config
+RUN yq -i e '.ors.engine.profile_default.build.source_file = "/home/ors/files/example-heidelberg.test.pbf"' /example-ors-config.yml && \
+    yq -i e '.ors.engine.profiles.driving-car.enabled = true' /example-ors-config.yml && \
+    yq -i e '.ors.engine.profiles.driving-car.encoder_name = "driving-car"' /example-ors-config.yml && \
+    yq -i e '.ors.engine.profiles.walking.enabled = true' /example-ors-config.yml && \
+    yq -i e '.ors.engine.profiles.walking.encoder_name = "foot-walking"' /example-ors-config.yml && \
+    cp /example-ors-config.yml ${ORS_HOME}/config/ors-config.yml
+
+WORKDIR ${ORS_HOME}
+
+# Healthcheck
+HEALTHCHECK --interval=3s --timeout=2s CMD ["sh", "-c", "wget --quiet --tries=1 --spider http://localhost:8082/ors/v2/health || exit 1"]
+
+# Start the container
+ENTRYPOINT ["/entrypoint.sh"] 
