@@ -66,8 +66,23 @@ RUN yq -i -p=props -o=props \
     yq -i e '.ors.engine.profile_default.build.source_file = "/home/ors/files/example-heidelberg.test.pbf"' \
     /example-ors-config.yml
 
+# Configure profiles - NOTE: we need to create both the original and shortened profile name 
+# IMPORTANT: Both URL path and internal encoder name must be properly configured
+RUN yq -i -p=props -o=props '.ors.engine.profiles.driving-car.enabled="true"' /example-ors-config.env && \
+    yq -i -p=props -o=props '.ors.engine.profiles.driving-car.encoder_name="driving-car"' /example-ors-config.env && \
+    yq -i e '.ors.engine.profiles.driving-car.enabled = true' /example-ors-config.yml && \
+    yq -i e '.ors.engine.profiles.driving-car.encoder_name = "driving-car"' /example-ors-config.yml && \
+    yq -i -p=props -o=props '.ors.engine.profiles.foot-walking.enabled="true"' /example-ors-config.env && \
+    yq -i -p=props -o=props '.ors.engine.profiles.foot-walking.encoder_name="foot-walking"' /example-ors-config.env && \
+    yq -i e '.ors.engine.profiles.foot-walking.enabled = true' /example-ors-config.yml && \
+    yq -i e '.ors.engine.profiles.foot-walking.encoder_name = "foot-walking"' /example-ors-config.yml && \
+    yq -i -p=props -o=props '.ors.engine.profiles.walking.enabled="true"' /example-ors-config.env && \
+    yq -i -p=props -o=props '.ors.engine.profiles.walking.encoder_name="foot-walking"' /example-ors-config.env && \
+    yq -i e '.ors.engine.profiles.walking.enabled = true' /example-ors-config.yml && \
+    yq -i e '.ors.engine.profiles.walking.encoder_name = "foot-walking"' /example-ors-config.yml
+
 ENV BUILD_GRAPHS="False"
-ENV REBUILD_GRAPHS="False"
+ENV REBUILD_GRAPHS="True"
 # Set the ARG to an ENV. Else it will be lost.
 ENV ORS_HOME=${ORS_HOME}
 
